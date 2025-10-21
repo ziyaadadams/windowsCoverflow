@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>WindowsCoverflow</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>Windows Coverflow</Authors>
+    <Company>Windows Coverflow</Company>
+    <Product>Windows Coverflow Alt-Tab</Product>
+    <Description>A Coverflow-style Alt-Tab window switcher for Windows</Description>
+    <Copyright>Copyright © 2025</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
