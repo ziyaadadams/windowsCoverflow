@@ -15,13 +15,23 @@ namespace WindowsCoverflow.Services
         private const int VK_LMENU = 0xA4;  // Left Alt
         private const int VK_RMENU = 0xA5;  // Right Alt
         private const int VK_MENU = 0x12;   // Alt key (generic)
+        private const int VK_SHIFT = 0x10;
+        private const int VK_LSHIFT = 0xA0;
+        private const int VK_RSHIFT = 0xA1;
 
         private IntPtr _hookId = IntPtr.Zero;
-        private LowLevelKeyboardProc? _proc;
+        private static LowLevelKeyboardProc? _proc;
         private bool _altPressed = false;
         private bool _isHandlingAltTab = false;
+        private bool _shiftPressed = false;
 
-        public event EventHandler? AltTabPressed;
+        public sealed class AltTabEventArgs : EventArgs
+        {
+            public bool Reverse { get; }
+            public AltTabEventArgs(bool reverse) => Reverse = reverse;
+        }
+
+        public event EventHandler<AltTabEventArgs>? AltTabPressed;
         public event EventHandler? AltReleased;
 
         #region Win32 API
@@ -41,6 +51,11 @@ namespace WindowsCoverflow.Services
 
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
+        
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+        
+        private const uint KEYEVENTF_KEYUP = 0x0002;
 
         private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -59,22 +74,18 @@ namespace WindowsCoverflow.Services
         public void Register()
         {
             _proc = HookCallback;
-            using var curProcess = Process.GetCurrentProcess();
-            using var curModule = curProcess.MainModule;
-            
-            if (curModule != null)
+
+            // For WH_KEYBOARD_LL, passing hMod = IntPtr.Zero is valid and often more reliable for managed apps.
+            _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, IntPtr.Zero, 0);
+
+            if (_hookId == IntPtr.Zero)
             {
-                _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, GetModuleHandle(curModule.ModuleName), 0);
-                
-                if (_hookId == IntPtr.Zero)
-                {
-                    int errorCode = Marshal.GetLastWin32Error();
-                    Debug.WriteLine($"Failed to register keyboard hook. Error: {errorCode}");
-                }
-                else
-                {
-                    Debug.WriteLine("Keyboard hook registered successfully");
-                }
+                int errorCode = Marshal.GetLastWin32Error();
+                Debug.WriteLine($"Failed to register keyboard hook. Error: {errorCode}");
+            }
+            else
+            {
+                Debug.WriteLine("Keyboard hook registered successfully");
             }
         }
 
@@ -84,7 +95,12 @@ namespace WindowsCoverflow.Services
             {
                 UnhookWindowsHookEx(_hookId);
                 _hookId = IntPtr.Zero;
-                Debug.WriteLine("Keyboard hook unregistered");
+                
+                // Reset all states
+                _altPressed = false;
+                _isHandlingAltTab = false;
+                
+                Debug.WriteLine("Keyboard hook unregistered and state reset");
             }
         }
 
@@ -95,13 +111,30 @@ namespace WindowsCoverflow.Services
                 var kbStruct = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
                 int vkCode = kbStruct.vkCode;
 
+                bool isKeyDown = wParam == (IntPtr)WM_SYSKEYDOWN || wParam == (IntPtr)WM_KEYDOWN;
+                bool isKeyUp = wParam == (IntPtr)WM_SYSKEYUP || wParam == (IntPtr)WM_KEYUP;
+
+                // Track Shift state (so Shift+Alt+Tab works even if we block key delivery)
+                if (isKeyDown && (vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT))
+                    _shiftPressed = true;
+                else if (isKeyUp && (vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT))
+                    _shiftPressed = false;
+
+                // While we are handling Alt-Tab, block everything except Alt/Shift and Tab.
+                if (_isHandlingAltTab &&
+                    vkCode != VK_MENU && vkCode != VK_LMENU && vkCode != VK_RMENU &&
+                    vkCode != VK_TAB &&
+                    vkCode != VK_SHIFT && vkCode != VK_LSHIFT && vkCode != VK_RSHIFT)
+                {
+                    return (IntPtr)1;
+                }
+
                 // Check for Alt key down
-                if (wParam == (IntPtr)WM_SYSKEYDOWN || wParam == (IntPtr)WM_KEYDOWN)
+                if (isKeyDown)
                 {
                     if (vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU)
                     {
                         _altPressed = true;
-                        Debug.WriteLine("Alt pressed");
                     }
                     // Check for Tab key while Alt is pressed
                     else if (vkCode == VK_TAB)
@@ -111,12 +144,12 @@ namespace WindowsCoverflow.Services
                         
                         if (_altPressed || altIsDown)
                         {
-                            Debug.WriteLine("Alt+Tab detected - invoking event");
                             _isHandlingAltTab = true;
                             
                             try
                             {
-                                AltTabPressed?.Invoke(this, EventArgs.Empty);
+                                bool shiftIsDown = _shiftPressed || (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                                AltTabPressed?.Invoke(this, new AltTabEventArgs(shiftIsDown));
                             }
                             catch (Exception ex)
                             {
@@ -129,11 +162,24 @@ namespace WindowsCoverflow.Services
                     }
                 }
                 // Check for Alt key up
-                else if (wParam == (IntPtr)WM_SYSKEYUP || wParam == (IntPtr)WM_KEYUP)
+                else if (isKeyUp)
                 {
+                    // Block Tab key up too (helps prevent native switcher in some configurations)
+                    if (vkCode == VK_TAB)
+                    {
+                        bool altIsDown = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+                        if (_altPressed || altIsDown || _isHandlingAltTab)
+                            return (IntPtr)1;
+                    }
+
+                    // Block shift key up/down while handling to prevent leaking input to underlying apps
+                    if (_isHandlingAltTab && (vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT))
+                    {
+                        return (IntPtr)1;
+                    }
+
                     if (vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU)
                     {
-                        Debug.WriteLine("Alt released");
                         _altPressed = false;
                         
                         if (_isHandlingAltTab)
@@ -147,6 +193,20 @@ namespace WindowsCoverflow.Services
             }
 
             return CallNextHookEx(_hookId, nCode, wParam, lParam);
+        }
+
+        public void ResetState()
+        {
+            _altPressed = false;
+            _isHandlingAltTab = false;
+            _shiftPressed = false;
+            
+            // Force release all Alt keys
+            keybd_event((byte)VK_LMENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event((byte)VK_RMENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event((byte)VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            
+            Debug.WriteLine("Keyboard hook state forcefully reset and Alt keys released");
         }
 
         public void Dispose()

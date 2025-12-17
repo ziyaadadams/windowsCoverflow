@@ -7,12 +7,14 @@ using System.Text;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
+using System.Collections.Concurrent;
 using WindowsCoverflow.Models;
 
 namespace WindowsCoverflow.Services
 {
     public class WindowManager
     {
+        private static readonly ConcurrentDictionary<IntPtr, BitmapSource> ThumbnailCache = new();
         #region Win32 API
 
         [DllImport("user32.dll")]
@@ -35,6 +37,21 @@ namespace WindowsCoverflow.Services
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        
+        [DllImport("user32.dll")]
+        private static extern bool BringWindowToTop(IntPtr hWnd);
+        
+        [DllImport("user32.dll")]
+        private static extern bool SetFocus(IntPtr hWnd);
+        
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+        
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+        
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
@@ -50,18 +67,61 @@ namespace WindowsCoverflow.Services
 
         [DllImport("user32.dll")]
         private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+        
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int nWidth, int nHeight);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
+            IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hdc);
 
         [DllImport("gdi32.dll")]
         private static extern bool DeleteObject(IntPtr hObject);
 
         [DllImport("dwmapi.dll")]
         private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out bool pvAttribute, int cbAttribute);
+        
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+        
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmUnregisterThumbnail(IntPtr thumb);
+        
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmUpdateThumbnailProperties(IntPtr hThumb, ref DWM_THUMBNAIL_PROPERTIES props);
+        
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmQueryThumbnailSourceSize(IntPtr thumb, out SIZE size);
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetShellWindow();
 
         [DllImport("shell32.dll")]
         private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SHGetImageList(int iImageList, ref Guid riid, out IntPtr ppv);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyIcon(IntPtr hIcon);
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -85,6 +145,24 @@ namespace WindowsCoverflow.Services
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
             public string szTypeName;
         }
+        
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE
+        {
+            public int cx;
+            public int cy;
+        }
+        
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DWM_THUMBNAIL_PROPERTIES
+        {
+            public int dwFlags;
+            public RECT rcDestination;
+            public RECT rcSource;
+            public byte opacity;
+            public bool fVisible;
+            public bool fSourceClientAreaOnly;
+        }
 
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -94,10 +172,51 @@ namespace WindowsCoverflow.Services
         private const int DWMWA_CLOAKED = 14;
         private const uint SHGFI_ICON = 0x100;
         private const uint SHGFI_SMALLICON = 0x1;
+        private const uint SHGFI_SYSICONINDEX = 0x4000;
+        private const int SHIL_JUMBO = 0x4;
+        private const int ILD_TRANSPARENT = 0x1;
+
+        [ComImport]
+        [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IImageList
+        {
+            int Add(IntPtr hbmImage, IntPtr hbmMask, out int pi);
+            int ReplaceIcon(int i, IntPtr hicon, out int pi);
+            int SetOverlayImage(int iImage, int iOverlay);
+            int Replace(int i, IntPtr hbmImage, IntPtr hbmMask);
+            int AddMasked(IntPtr hbmImage, int crMask, out int pi);
+            int Draw(ref IMAGELISTDRAWPARAMS pimldp);
+            int Remove(int i);
+            int GetIcon(int i, int flags, out IntPtr picon);
+            // Remaining methods not needed
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IMAGELISTDRAWPARAMS
+        {
+            public int cbSize;
+            public IntPtr himl;
+            public int i;
+            public IntPtr hdcDst;
+            public int x;
+            public int y;
+            public int cx;
+            public int cy;
+            public int xBitmap;
+            public int yBitmap;
+            public int rgbBk;
+            public int rgbFg;
+            public int fStyle;
+            public int dwRop;
+            public int fState;
+            public int Frame;
+            public int crEffect;
+        }
 
         #endregion
 
-        public List<WindowInfo> GetWindows()
+        public List<WindowInfo> GetWindows(bool captureThumbnails = false)
         {
             var windows = new List<WindowInfo>();
             var shellWindow = GetShellWindow();
@@ -157,7 +276,9 @@ namespace WindowsCoverflow.Services
                     Title = title.ToString(),
                     ProcessName = processName,
                     IsMinimized = IsIconic(hWnd),
-                    Thumbnail = CaptureWindow(hWnd),
+                    Thumbnail = captureThumbnails
+                        ? CaptureWindow(hWnd, allowScreenCapture: true)
+                        : (ThumbnailCache.TryGetValue(hWnd, out var cached) ? cached : null),
                     Icon = GetWindowIcon(hWnd, processName)
                 };
 
@@ -168,57 +289,256 @@ namespace WindowsCoverflow.Services
             return windows;
         }
 
-        private BitmapSource? CaptureWindow(IntPtr hWnd)
+        public BitmapSource? CaptureThumbnail(IntPtr hWnd, bool allowScreenCapture)
+        {
+            return CaptureWindow(hWnd, allowScreenCapture);
+        }
+
+        private static bool IsLikelyBlankCapture(BitmapSource bitmap)
         {
             try
             {
-                GetWindowRect(hWnd, out RECT rect);
-                int width = rect.Right - rect.Left;
-                int height = rect.Bottom - rect.Top;
+                if (bitmap.PixelWidth < 2 || bitmap.PixelHeight < 2)
+                    return true;
 
-                if (width <= 0 || height <= 0)
-                    return null;
-
-                // Limit size for performance
-                int maxWidth = 400;
-                int maxHeight = 300;
-                
-                if (width > maxWidth || height > maxHeight)
+                BitmapSource src = bitmap;
+                if (src.Format != System.Windows.Media.PixelFormats.Bgra32 &&
+                    src.Format != System.Windows.Media.PixelFormats.Pbgra32)
                 {
-                    double scale = Math.Min((double)maxWidth / width, (double)maxHeight / height);
-                    width = (int)(width * scale);
-                    height = (int)(height * scale);
+                    var converted = new System.Windows.Media.Imaging.FormatConvertedBitmap(
+                        src,
+                        System.Windows.Media.PixelFormats.Bgra32,
+                        null,
+                        0);
+                    converted.Freeze();
+                    src = converted;
                 }
 
-                using var bmp = new System.Drawing.Bitmap(width, height);
-                using var graphics = System.Drawing.Graphics.FromImage(bmp);
-                var hdc = graphics.GetHdc();
-                
-                try
+                int w = src.PixelWidth;
+                int h = src.PixelHeight;
+
+                var samplePoints = new (int x, int y)[]
                 {
-                    PrintWindow(hWnd, hdc, 0);
-                }
-                finally
+                    (1, 1),
+                    (w / 2, 1),
+                    (w - 2, 1),
+                    (1, h / 2),
+                    (w / 2, h / 2),
+                    (w - 2, h / 2),
+                    (1, h - 2),
+                    (w / 2, h - 2),
+                    (w - 2, h - 2)
+                };
+
+                int minLuma = 255;
+                int maxLuma = 0;
+
+                byte[] pixel = new byte[4];
+                foreach (var (x, y) in samplePoints)
                 {
-                    graphics.ReleaseHdc(hdc);
+                    src.CopyPixels(new Int32Rect(x, y, 1, 1), pixel, 4, 0);
+                    // BGRA
+                    int b = pixel[0];
+                    int g = pixel[1];
+                    int r = pixel[2];
+                    int luma = (r + g + b) / 3;
+                    if (luma < minLuma) minLuma = luma;
+                    if (luma > maxLuma) maxLuma = luma;
                 }
 
-                var hBitmap = bmp.GetHbitmap();
-                try
+                // Nearly uniform image (all black-ish or all white-ish) is a common "failed capture" symptom.
+                if (maxLuma - minLuma <= 8)
                 {
-                    return Imaging.CreateBitmapSourceFromHBitmap(
-                        hBitmap,
-                        IntPtr.Zero,
-                        Int32Rect.Empty,
-                        BitmapSizeOptions.FromEmptyOptions());
+                    if (maxLuma <= 8) return true;      // black
+                    if (minLuma >= 247) return true;    // white
                 }
-                finally
-                {
-                    DeleteObject(hBitmap);
-                }
+
+                return false;
             }
             catch
             {
+                // If we can't inspect pixels, assume it's not blank so we still attempt to render it.
+                return false;
+            }
+        }
+
+        private BitmapSource? CaptureWindow(IntPtr hWnd, bool allowScreenCapture)
+        {
+            try
+            {
+                // If minimized, prefer last known good cached thumbnail
+                if (IsIconic(hWnd) && ThumbnailCache.TryGetValue(hWnd, out var cached))
+                    return cached;
+                
+                // Get window position on screen
+                if (!GetWindowRect(hWnd, out RECT rect))
+                {
+                    Debug.WriteLine("Failed to get window rect");
+                    return null;
+                }
+                
+                int width = rect.Right - rect.Left;
+                int height = rect.Bottom - rect.Top;
+
+                if (width <= 10 || height <= 10 || width > 10000 || height > 10000)
+                {
+                    Debug.WriteLine($"Invalid window size: {width}x{height}");
+                    return null;
+                }
+
+                // Limit size for performance but prioritize quality
+                int maxWidth = 2560;
+                int maxHeight = 1600;
+                
+                double scaleX = 1.0;
+                double scaleY = 1.0;
+                
+                if (width > maxWidth)
+                    scaleX = (double)maxWidth / width;
+                
+                if (height > maxHeight)
+                    scaleY = (double)maxHeight / height;
+                
+                double scale = Math.Min(scaleX, scaleY);
+                int targetWidth = (int)(width * scale);
+                int targetHeight = (int)(height * scale);
+
+                // METHOD 0: Windows Graphics Capture (best for modern GPU/UWP/Chromium windows)
+                try
+                {
+                    var wgc = WindowsGraphicsCaptureService.TryCaptureWindow(hWnd, maxWidth, maxHeight);
+                    if (wgc != null && !IsLikelyBlankCapture(wgc))
+                    {
+                        ThumbnailCache[hWnd] = wgc;
+                        return wgc;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"WGC capture exception: {ex.Message}");
+                }
+
+                // METHOD 1: Try PrintWindow (doesn't include our overlay)
+                using var bitmap = new System.Drawing.Bitmap(width, height);
+                using var graphics = System.Drawing.Graphics.FromImage(bitmap);
+                
+                graphics.Clear(System.Drawing.Color.White);
+                IntPtr hdcBitmap = graphics.GetHdc();
+                
+                try
+                {
+                    // Try multiple PrintWindow flags
+                    bool success = PrintWindow(hWnd, hdcBitmap, 2); // PW_RENDERFULLCONTENT
+                    
+                    if (!success)
+                        success = PrintWindow(hWnd, hdcBitmap, 0);
+                }
+                finally
+                {
+                    graphics.ReleaseHdc(hdcBitmap);
+                }
+
+                // Scale
+                System.Drawing.Bitmap finalBmp = bitmap;
+                if (scale < 0.99)
+                {
+                    finalBmp = new System.Drawing.Bitmap(targetWidth, targetHeight);
+                    using var g = System.Drawing.Graphics.FromImage(finalBmp);
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(bitmap, 0, 0, targetWidth, targetHeight);
+                }
+
+                BitmapSource? printWindowSource = null;
+                var hBmp = finalBmp.GetHbitmap();
+                try
+                {
+                    var bitmapSource = Imaging.CreateBitmapSourceFromHBitmap(
+                        hBmp,
+                        IntPtr.Zero,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions());
+                    
+                    bitmapSource.Freeze();
+                    Debug.WriteLine($"Captured via PrintWindow: {width}x{height}");
+
+                    if (!IsLikelyBlankCapture(bitmapSource))
+                    {
+                        printWindowSource = bitmapSource;
+                    }
+                    else
+                    {
+                        Debug.WriteLine("PrintWindow capture looked blank; will try screen capture if allowed");
+                    }
+                }
+                finally
+                {
+                    DeleteObject(hBmp);
+                    if (finalBmp != bitmap)
+                        finalBmp.Dispose();
+                }
+
+                if (printWindowSource != null)
+                {
+                    ThumbnailCache[hWnd] = printWindowSource;
+                    return printWindowSource;
+                }
+
+                // METHOD 2: Optional screen capture (fast + works for many GPU windows, but can capture our UI overlay)
+                if (!allowScreenCapture)
+                    return null;
+
+                try
+                {
+                    using var screenBitmap = new System.Drawing.Bitmap(width, height);
+                    using var g = System.Drawing.Graphics.FromImage(screenBitmap);
+
+                    g.CopyFromScreen(rect.Left, rect.Top, 0, 0, new System.Drawing.Size(width, height));
+
+                    System.Drawing.Bitmap finalBitmap = screenBitmap;
+                    if (scale < 0.99)
+                    {
+                        finalBitmap = new System.Drawing.Bitmap(targetWidth, targetHeight);
+                        using var gScale = System.Drawing.Graphics.FromImage(finalBitmap);
+                        gScale.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        gScale.DrawImage(screenBitmap, 0, 0, targetWidth, targetHeight);
+                    }
+
+                    var hBitmap = finalBitmap.GetHbitmap();
+                    try
+                    {
+                        var bitmapSource = Imaging.CreateBitmapSourceFromHBitmap(
+                            hBitmap,
+                            IntPtr.Zero,
+                            Int32Rect.Empty,
+                            BitmapSizeOptions.FromEmptyOptions());
+
+                        bitmapSource.Freeze();
+                        Debug.WriteLine($"Captured via screen capture: {width}x{height}");
+
+                        if (IsLikelyBlankCapture(bitmapSource))
+                        {
+                            Debug.WriteLine("Screen capture looked blank; falling back to text card");
+                            return null;
+                        }
+
+                        return bitmapSource;
+                    }
+                    finally
+                    {
+                        DeleteObject(hBitmap);
+                        if (finalBitmap != screenBitmap)
+                            finalBitmap.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Screen capture failed: {ex.Message}");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error capturing window: {ex.Message}");
                 return null;
             }
         }
@@ -227,51 +547,111 @@ namespace WindowsCoverflow.Services
         {
             try
             {
-                // Try to get icon from process
-                var process = Process.GetProcessesByName(processName).FirstOrDefault();
-                if (process != null)
+                string? path = null;
+                try
                 {
-                    var shinfo = new SHFILEINFO();
-                    SHGetFileInfo(process.MainModule?.FileName ?? string.Empty, 0, ref shinfo, 
-                        (uint)Marshal.SizeOf(shinfo), SHGFI_ICON | SHGFI_SMALLICON);
+                    var process = Process.GetProcessesByName(processName).FirstOrDefault();
+                    path = process?.MainModule?.FileName;
+                }
+                catch { }
 
-                    if (shinfo.hIcon != IntPtr.Zero)
+                // 1) Try to fetch a high-res shell icon (256px) for the process path.
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    var shfi = new SHFILEINFO();
+                    var res = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), SHGFI_SYSICONINDEX);
+                    if (res != IntPtr.Zero)
                     {
-                        var icon = System.Drawing.Icon.FromHandle(shinfo.hIcon);
-                        var bitmap = icon.ToBitmap();
-                        var hBitmap = bitmap.GetHbitmap();
-                        
-                        try
+                        var iid = new Guid("46EB5926-582E-4017-9FDF-E8998DAA0950"); // IImageList
+                        if (SHGetImageList(SHIL_JUMBO, ref iid, out var ppv) == 0 && ppv != IntPtr.Zero)
                         {
-                            return Imaging.CreateBitmapSourceFromHBitmap(
-                                hBitmap,
-                                IntPtr.Zero,
-                                Int32Rect.Empty,
-                                BitmapSizeOptions.FromEmptyOptions());
-                        }
-                        finally
-                        {
-                            DeleteObject(hBitmap);
-                            bitmap.Dispose();
+                            var imageList = (IImageList)Marshal.GetObjectForIUnknown(ppv);
+                            try
+                            {
+                                if (imageList.GetIcon(shfi.iIcon, ILD_TRANSPARENT, out var hIcon) == 0 && hIcon != IntPtr.Zero)
+                                {
+                                    try
+                                    {
+                                        var src = Imaging.CreateBitmapSourceFromHIcon(hIcon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                                        src.Freeze();
+                                        return src;
+                                    }
+                                    finally
+                                    {
+                                        DestroyIcon(hIcon);
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.Release(ppv);
+                            }
                         }
                     }
-                }
-            }
-            catch { }
 
-            return null;
+                    // 2) Fall back to a smaller file icon.
+                    shfi = new SHFILEINFO();
+                    res = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), SHGFI_ICON | SHGFI_SMALLICON);
+                    if (res == IntPtr.Zero || shfi.hIcon == IntPtr.Zero) return null;
+
+                    try
+                    {
+                        var iconSrc = Imaging.CreateBitmapSourceFromHIcon(shfi.hIcon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                        iconSrc.Freeze();
+                        return iconSrc;
+                    }
+                    finally
+                    {
+                        DestroyIcon(shfi.hIcon);
+                    }
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public void SwitchToWindow(IntPtr hWnd)
         {
-            // Restore if minimized
-            if (IsIconic(hWnd))
+            try
             {
-                ShowWindow(hWnd, SW_RESTORE);
+                // Get current foreground window thread
+                IntPtr foregroundWindow = GetForegroundWindow();
+                uint foregroundThreadId = GetWindowThreadProcessId(foregroundWindow, out _);
+                uint currentThreadId = GetCurrentThreadId();
+                
+                // Attach to the foreground window thread to bypass restrictions
+                if (foregroundThreadId != currentThreadId)
+                {
+                    AttachThreadInput(currentThreadId, foregroundThreadId, true);
+                }
+                
+                // Restore if minimized
+                if (IsIconic(hWnd))
+                {
+                    ShowWindow(hWnd, SW_RESTORE);
+                }
+                
+                // Force the window to the top
+                BringWindowToTop(hWnd);
+                SetForegroundWindow(hWnd);
+                SetFocus(hWnd);
+                
+                // Detach threads
+                if (foregroundThreadId != currentThreadId)
+                {
+                    AttachThreadInput(currentThreadId, foregroundThreadId, false);
+                }
+                
+                Debug.WriteLine($"Successfully switched to window: {hWnd}");
             }
-            
-            // Bring to foreground
-            SetForegroundWindow(hWnd);
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error in SwitchToWindow: {ex.Message}");
+            }
         }
 
         public void CloseWindow(IntPtr hWnd)

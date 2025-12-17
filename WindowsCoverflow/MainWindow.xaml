@@ -6,12 +6,11 @@
         mc:Ignorable="d"
         Title="Windows Coverflow" 
         Style="{StaticResource CoverflowWindowStyle}"
-        Loaded="Window_Loaded"
         KeyDown="Window_KeyDown"
         MouseWheel="Window_MouseWheel">
     
-    <Grid x:Name="MainGrid" Background="#CC000000">
-        <!-- Semi-transparent black background -->
+    <Grid x:Name="MainGrid" Background="#80000000">
+        <!-- Dimming overlay kept light so blur is visible -->
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -21,14 +20,14 @@
         <Viewport3D x:Name="Viewport" Grid.Row="0" ClipToBounds="False">
             <Viewport3D.Camera>
                 <PerspectiveCamera x:Name="Camera" 
-                                 Position="0,0,800" 
+                                 Position="0,0,1000" 
                                  LookDirection="0,0,-1" 
                                  UpDirection="0,1,0" 
-                                 FieldOfView="60"/>
+                                 FieldOfView="50"/>
             </Viewport3D.Camera>
 
-            <!-- Lighting and window cards container -->
-            <ModelVisual3D>
+            <!-- Lighting (kept in viewport; cards are added in code) -->
+            <ModelVisual3D x:Name="LightsVisual">
                 <ModelVisual3D.Content>
                     <Model3DGroup>
                         <AmbientLight Color="#666666"/>
@@ -40,11 +39,12 @@
             <!-- Dynamic window cards will be added here via code -->
         </Viewport3D>
 
-        <!-- Bottom info bar -->
+        <!-- Bottom info bar (disabled: per-card icon+title is rendered on each card) -->
         <Border Grid.Row="1" 
                 Background="#DD000000" 
                 Padding="20"
-                Height="100">
+                Height="100"
+                Visibility="Collapsed">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
