@@ -28,7 +28,7 @@ namespace WindowsCoverflow.Services
         {
             _notifyIcon = new NotifyIcon
             {
-                Icon = System.Drawing.SystemIcons.Application,
+                Icon = CreateTaskSwitcherIcon(),
                 Visible = true,
                 Text = "Windows Coverflow - Alt+Tab Replacement"
             };
@@ -85,6 +85,53 @@ namespace WindowsCoverflow.Services
                 "About Windows Coverflow",
                 WpfMessageBoxButton.OK,
                 WpfMessageBoxImage.Information);
+        }
+
+        private System.Drawing.Icon CreateTaskSwitcherIcon()
+        {
+            // Create a 32x32 bitmap for the icon
+            using var bmp = new System.Drawing.Bitmap(32, 32);
+            using var g = System.Drawing.Graphics.FromImage(bmp);
+            
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(System.Drawing.Color.Transparent);
+
+            // Draw three overlapping rectangles representing windows in coverflow
+            var blue = System.Drawing.Color.FromArgb(255, 74, 144, 226);
+            var lightBlue = System.Drawing.Color.FromArgb(255, 91, 163, 245);
+            var darkBlue = System.Drawing.Color.FromArgb(255, 53, 122, 189);
+
+            // Left window (back, darker)
+            using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(200, lightBlue.R, lightBlue.G, lightBlue.B)))
+            using (var pen = new System.Drawing.Pen(darkBlue, 1.5f))
+            {
+                g.FillRectangle(brush, 3, 10, 10, 14);
+                g.DrawRectangle(pen, 3, 10, 10, 14);
+            }
+
+            // Right window (back, darker)
+            using (var brush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(200, lightBlue.R, lightBlue.G, lightBlue.B)))
+            using (var pen = new System.Drawing.Pen(darkBlue, 1.5f))
+            {
+                g.FillRectangle(brush, 19, 10, 10, 14);
+                g.DrawRectangle(pen, 19, 10, 10, 14);
+            }
+
+            // Center window (focused, brighter and larger)
+            using (var brush = new System.Drawing.SolidBrush(blue))
+            using (var pen = new System.Drawing.Pen(darkBlue, 2f))
+            {
+                g.FillRectangle(brush, 10, 6, 12, 18);
+                g.DrawRectangle(pen, 10, 6, 12, 18);
+                
+                // Add window title bar indication
+                using (var titleBrush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(100, 255, 255, 255)))
+                {
+                    g.FillRectangle(titleBrush, 10, 6, 12, 3);
+                }
+            }
+
+            return System.Drawing.Icon.FromHandle(bmp.GetHicon());
         }
 
         public void Dispose()

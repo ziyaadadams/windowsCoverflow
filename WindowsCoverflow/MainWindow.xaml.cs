@@ -16,6 +16,42 @@ namespace WindowsCoverflow
 {
     public partial class MainWindow : Window
     {
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public uint cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
         private const double CardMeshWidth = 400;
         private const double CardMeshHeight = 300;
 
@@ -179,6 +215,9 @@ namespace WindowsCoverflow
             // Preload a few thumbnails while we're still hidden to avoid capturing the switcher overlay
             PreloadThumbnailsAroundCurrent();
 
+            // Position window on the monitor with the mouse cursor
+            PositionOnCurrentMonitor();
+
             // Restore window state and show
             this.WindowState = WindowState.Maximized;
             this.Visibility = Visibility.Visible;
@@ -195,6 +234,30 @@ namespace WindowsCoverflow
             QueueThumbnailLoadAroundCurrent();
             
             System.Diagnostics.Debug.WriteLine("Coverflow built successfully");
+        }
+
+        private void PositionOnCurrentMonitor()
+        {
+            // Get cursor position
+            if (GetCursorPos(out POINT cursorPos))
+            {
+                // Get the monitor that contains the cursor
+                IntPtr hMonitor = MonitorFromPoint(cursorPos, MONITOR_DEFAULTTONEAREST);
+                
+                if (hMonitor != IntPtr.Zero)
+                {
+                    MONITORINFO monitorInfo = new MONITORINFO();
+                    monitorInfo.cbSize = (uint)Marshal.SizeOf(typeof(MONITORINFO));
+                    
+                    if (GetMonitorInfo(hMonitor, ref monitorInfo))
+                    {
+                        // Set window position to be on the target monitor
+                        // When we maximize, it will maximize on whichever monitor contains the window's position
+                        this.Left = monitorInfo.rcMonitor.Left + 100;
+                        this.Top = monitorInfo.rcMonitor.Top + 100;
+                    }
+                }
+            }
         }
 
         private void HideSwitcher()
@@ -397,55 +460,38 @@ namespace WindowsCoverflow
         {
             var dpi = VisualTreeHelper.GetDpi(this);
 
-            // Higher base resolution for sharper previews
-            const int baseCardW = 1600;
-            const int baseCardH = 1000;
-            const int baseFooterH = 92;
-
-            double dpiScale = Math.Max(dpi.DpiScaleX, dpi.DpiScaleY);
-            int cardW = (int)Math.Round(baseCardW * dpiScale);
-            int cardH = (int)Math.Round(baseCardH * dpiScale);
-            int footerH = (int)Math.Round(baseFooterH * dpiScale);
-            int previewH = cardH - footerH;
-
-            // Clamp to avoid excessive memory/CPU on very high DPI.
-            cardW = Math.Min(cardW, 3200);
-            cardH = Math.Min(cardH, 2000);
-            footerH = Math.Min(footerH, 220);
-            previewH = cardH - footerH;
+            // Fixed resolution for crisp rendering
+            const int cardW = 1600;
+            const int cardH = 1000;
+            const int footerH = 100;
+            const int previewH = cardH - footerH;
 
             var dv = new DrawingVisual();
             RenderOptions.SetBitmapScalingMode(dv, BitmapScalingMode.HighQuality);
             using (var dc = dv.RenderOpen())
             {
-                // No background - fully transparent to show blur effect
-
-                // Preview area
+                // Preview area - full window preview without clipping
                 Rect previewRect = new Rect(0, 0, cardW, previewH);
                 if (window.Thumbnail != null)
                 {
                     var thumbBrush = new ImageBrush(window.Thumbnail)
                     {
-                        Stretch = Stretch.Uniform,
-                        TileMode = TileMode.None
+                        Stretch = Stretch.UniformToFill,
+                        TileMode = TileMode.None,
+                        AlignmentX = AlignmentX.Center,
+                        AlignmentY = AlignmentY.Center
                     };
                     RenderOptions.SetBitmapScalingMode(thumbBrush, BitmapScalingMode.Fant);
                     dc.DrawRectangle(thumbBrush, null, previewRect);
                 }
-                else
-                {
-                    // No fallback background - keep transparent
-                }
 
                 // Icon with proper sizing (no stretching)
-                double iconSize = Math.Round(48 * dpiScale);
-                double iconX = Math.Round(16 * dpiScale);
+                const double iconSize = 56;
+                const double iconX = 20;
                 double iconY = previewH + (footerH - iconSize) / 2;
                 if (window.Icon != null)
                 {
-                    dc.PushClip(new RectangleGeometry(new Rect(iconX, iconY, iconSize, iconSize)));
                     dc.DrawImage(window.Icon, new Rect(iconX, iconY, iconSize, iconSize));
-                    dc.Pop();
                 }
 
                 // Title with proper font sizing
@@ -457,11 +503,11 @@ namespace WindowsCoverflow
                     System.Globalization.CultureInfo.CurrentCulture,
                     FlowDirection.LeftToRight,
                     new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
-                    Math.Round(22 * dpiScale),
+                    26,
                     new SolidColorBrush(Color.FromRgb(230, 230, 230)),
-                    VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                    1.0);
 
-                double textX = iconX + iconSize + Math.Round(12 * dpiScale);
+                double textX = iconX + iconSize + 16;
                 double textY = previewH + (footerH - ft.Height) / 2;
                 dc.DrawText(ft, new Point(textX, textY));
             }
@@ -600,18 +646,19 @@ namespace WindowsCoverflow
 
                     visualsWithDistance.Add((visual, relativeIndex));
                     
-                    // Focused window at 50% of screen, side windows clearly visible
-                    const double coverflowWindowAngle = 55;
-                    const double coverflowWindowOffsetWidth = 380;
-                    const double previewScalingFactor = 0.8;
-                    const double zOffset = -200;
+                    // Classic coverflow: smooth 3D carousel with proper spacing and visibility
+                    const double coverflowWindowAngle = 50;
+                    const double coverflowWindowOffsetWidth = 400;
+                    const double previewScalingFactor = 0.88;
+                    const double zOffset = -150;
 
                     double distance = Math.Abs(relativeIndex);
                     double xPos = relativeIndex * coverflowWindowOffsetWidth;
                     double yAngle = relativeIndex == 0 ? 0 : Math.Sign(relativeIndex) * coverflowWindowAngle;
 
-                    double scale = relativeIndex == 0 ? 1.3 : Math.Pow(previewScalingFactor, distance);
-                    if (scale < 0.70) scale = 0.70;
+                    // Center window prominent but not oversized, side windows clearly visible
+                    double scale = relativeIndex == 0 ? 1.25 : Math.Pow(previewScalingFactor, distance);
+                    if (scale < 0.68) scale = 0.68;
 
                     var parts = EnsureTransformParts(visual);
 
@@ -632,8 +679,8 @@ namespace WindowsCoverflow
 
                     AnimateDouble(parts.Translate, TranslateTransform3D.OffsetXProperty, xPos, duration, ease);
                     AnimateDouble(parts.Translate, TranslateTransform3D.OffsetYProperty, 0, duration, ease);
-                    // Tiny epsilon per index avoids z-fighting when things get close.
-                    AnimateDouble(parts.Translate, TranslateTransform3D.OffsetZProperty, zOffset - (distance * 0.01), duration, ease);
+                    // Z-depth increases with distance for proper depth layering
+                    AnimateDouble(parts.Translate, TranslateTransform3D.OffsetZProperty, zOffset - (distance * 20), duration, ease);
                 }
             }
 

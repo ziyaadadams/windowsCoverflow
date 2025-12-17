@@ -100,6 +100,9 @@ namespace WindowsCoverflow.Services
         private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out bool pvAttribute, int cbAttribute);
         
         [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+        
+        [DllImport("dwmapi.dll")]
         private static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
         
         [DllImport("dwmapi.dll")]
@@ -170,6 +173,7 @@ namespace WindowsCoverflow.Services
         private const int SW_SHOW = 5;
         private const uint WM_CLOSE = 0x0010;
         private const int DWMWA_CLOAKED = 14;
+        private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
         private const uint SHGFI_ICON = 0x100;
         private const uint SHGFI_SMALLICON = 0x1;
         private const uint SHGFI_SYSICONINDEX = 0x4000;
@@ -370,15 +374,22 @@ namespace WindowsCoverflow.Services
                 if (IsIconic(hWnd) && ThumbnailCache.TryGetValue(hWnd, out var cached))
                     return cached;
                 
-                // Get window position on screen
-                if (!GetWindowRect(hWnd, out RECT rect))
+                // Get window position on screen (includes borders/shadows)
+                if (!GetWindowRect(hWnd, out RECT windowRect))
                 {
                     Debug.WriteLine("Failed to get window rect");
                     return null;
                 }
                 
-                int width = rect.Right - rect.Left;
-                int height = rect.Bottom - rect.Top;
+                // Get actual content bounds (excludes borders/shadows)
+                RECT contentRect = windowRect;
+                if (DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out RECT extendedRect, Marshal.SizeOf(typeof(RECT))) == 0)
+                {
+                    contentRect = extendedRect;
+                }
+                
+                int width = contentRect.Right - contentRect.Left;
+                int height = contentRect.Bottom - contentRect.Top;
 
                 if (width <= 10 || height <= 10 || width > 10000 || height > 10000)
                 {
@@ -409,8 +420,10 @@ namespace WindowsCoverflow.Services
                     var wgc = WindowsGraphicsCaptureService.TryCaptureWindow(hWnd, maxWidth, maxHeight);
                     if (wgc != null && !IsLikelyBlankCapture(wgc))
                     {
-                        ThumbnailCache[hWnd] = wgc;
-                        return wgc;
+                        // Crop to remove borders if WGC captured the full window
+                        var cropped = CropToBounds(wgc, windowRect, contentRect);
+                        ThumbnailCache[hWnd] = cropped;
+                        return cropped;
                     }
                 }
                 catch (Exception ex)
@@ -492,7 +505,7 @@ namespace WindowsCoverflow.Services
                     using var screenBitmap = new System.Drawing.Bitmap(width, height);
                     using var g = System.Drawing.Graphics.FromImage(screenBitmap);
 
-                    g.CopyFromScreen(rect.Left, rect.Top, 0, 0, new System.Drawing.Size(width, height));
+                    g.CopyFromScreen(contentRect.Left, contentRect.Top, 0, 0, new System.Drawing.Size(width, height));
 
                     System.Drawing.Bitmap finalBitmap = screenBitmap;
                     if (scale < 0.99)
@@ -664,6 +677,36 @@ namespace WindowsCoverflow.Services
             // Minimize all windows
             var shellWindow = GetShellWindow();
             SendMessage(shellWindow, 0x111, (IntPtr)0x7502, IntPtr.Zero);
+        }
+
+        private BitmapSource CropToBounds(BitmapSource source, RECT windowRect, RECT contentRect)
+        {
+            try
+            {
+                // Calculate crop region
+                int cropLeft = contentRect.Left - windowRect.Left;
+                int cropTop = contentRect.Top - windowRect.Top;
+                int cropWidth = contentRect.Right - contentRect.Left;
+                int cropHeight = contentRect.Bottom - contentRect.Top;
+
+                // Ensure crop region is valid
+                if (cropLeft < 0) cropLeft = 0;
+                if (cropTop < 0) cropTop = 0;
+                if (cropLeft + cropWidth > source.PixelWidth) cropWidth = source.PixelWidth - cropLeft;
+                if (cropTop + cropHeight > source.PixelHeight) cropHeight = source.PixelHeight - cropTop;
+
+                if (cropWidth <= 0 || cropHeight <= 0)
+                    return source; // Can't crop, return original
+
+                // Create cropped bitmap
+                var cropped = new CroppedBitmap(source, new Int32Rect(cropLeft, cropTop, cropWidth, cropHeight));
+                cropped.Freeze();
+                return cropped;
+            }
+            catch
+            {
+                return source; // If cropping fails, return original
+            }
         }
     }
 }

@@ -1,34 +1,41 @@
 # Windows Coverflow
 
-A beautiful coverflow-style Alt-Tab window switcher for Windows, inspired by the GNOME Coverflow extension.
+A professional coverflow-style Alt-Tab window switcher for Windows, inspired by the GNOME Coverflow extension.
 
 ![Windows Coverflow](https://img.shields.io/badge/platform-Windows-blue)
-![.NET](https://img.shields.io/badge/.NET-8.0-purple)
+![.NET](https://img.shields.io/badge/.NET-9.0-purple)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
-## ✨ Features
+## Features
 
-- **3D Coverflow Effect**: Navigate through your windows with a stunning 3D coverflow animation
-- **Global Hotkey**: Press `Alt+Tab` to open the switcher
+- **3D Coverflow Effect**: Navigate through your windows with a stunning 3D coverflow animation featuring smooth easing and realistic perspective
+- **Global Hotkey Support**: Press `Alt+Tab` to open the switcher with system-wide capture
 - **Multiple Navigation Options**:
-  - Arrow keys for precise control
-  - Mouse wheel for quick scrolling
   - Tab key to cycle through windows
-- **Window Management**:
-  - Press `Enter` or `Space` to switch to selected window
-  - Press `Q` to close the current window
-  - Press `D` to show desktop (minimize all)
+  - Shift+Tab for reverse navigation
+  - Mouse wheel for quick scrolling
+- **Advanced Window Management**:
+  - Press `Enter` to switch to selected window
   - Press `Esc` to cancel
-- **Background Service**: Runs silently in the system tray
-- **Window Thumbnails**: Live window previews captured via Windows DWM API
+  - Intelligent window state handling (minimized windows are properly restored)
+- **Background Service**: Runs silently in the system tray with minimal resource usage
+- **High-Quality Window Previews**: 
+  - Windows Graphics Capture (WGC) integration for sharp, high-resolution previews
+  - Fallback to PrintWindow API for maximum compatibility
+  - Up to 2560x1600 capture resolution for crisp display
+- **Visual Polish**:
+  - Transparent background with desktop blur effect
+  - 3D reflections for each window card
+  - Smooth animations with quintic easing
+  - Application icons and titles rendered directly on cards
 - **Smart Filtering**: Automatically hides tool windows, invisible windows, and system windows
 
-## 🚀 Installation
+## Installation
 
 ### Prerequisites
 
-- Windows 10 or Windows 11
-- .NET 8.0 Runtime (Desktop)
+- Windows 10 (version 19041 or later) or Windows 11
+- .NET 9.0 Runtime (Desktop)
 
 ### Building from Source
 
@@ -45,39 +52,34 @@ dotnet build -c Release
 
 3. Run the application:
 ```powershell
-dotnet run --project WindowsCoverflow\WindowsCoverflow.csproj
+.\WindowsCoverflow\bin\Release\net9.0-windows10.0.19041.0\WindowsCoverflow.exe
 ```
 
-### Creating an Executable
+### Creating a Standalone Executable
 
 ```powershell
-dotnet publish -c Release -r win-x64 --self-contained false
+dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
-The executable will be in `WindowsCoverflow\bin\Release\net8.0-windows\win-x64\publish\`
+The self-contained executable will be in `WindowsCoverflow\bin\Release\net9.0-windows10.0.19041.0\win-x64\publish\`
 
-## 📖 Usage
+## Usage
 
 ### Starting the Application
 
-Simply run `WindowsCoverflow.exe`. The application will:
+Run `WindowsCoverflow.exe`. The application will:
 - Start minimized to the system tray
-- Register a global `Alt+Tab` hotkey
-- Wait for you to trigger the window switcher
+- Register a global `Alt+Tab` hotkey override
+- Remain idle until triggered
 
 ### Keyboard Controls
 
 | Key | Action |
 |-----|--------|
-| `Alt+Tab` | Open/cycle through windows |
-| `→` / `←` | Navigate next/previous window |
-| `Tab` | Navigate next window |
-| `Shift+Tab` | Navigate previous window |
-| `Enter` / `Space` | Switch to selected window |
+| `Alt+Tab` | Open and cycle forward through windows |
+| `Alt+Shift+Tab` | Cycle backward through windows |
+| `Enter` | Switch to selected window and close switcher |
 | `Esc` | Cancel and close switcher |
-| `Q` | Close the currently selected window |
-| `D` | Show desktop (minimize all windows) |
-| `F1` | Show/hide help overlay |
 
 ### Mouse Controls
 
@@ -88,93 +90,115 @@ Simply run `WindowsCoverflow.exe`. The application will:
 
 Right-click the system tray icon for options:
 - **Show Switcher**: Manually open the window switcher
-- **Settings**: Configure preferences (coming soon)
-- **About**: View application information
 - **Exit**: Close the application
 
-## 🎨 How It Works
+## Technical Details
 
-The application uses several Windows technologies:
+### Core Technologies
 
-1. **Win32 Low-Level Keyboard Hook**: Captures `Alt+Tab` globally before Windows processes it
-2. **DWM (Desktop Window Manager) API**: Captures live window thumbnails
-3. **WPF 3D**: Renders the coverflow effect using `Viewport3D` and perspective transformations
-4. **Window Enumeration**: Uses `EnumWindows` to discover all visible windows
+1. **Low-Level Keyboard Hook**: Win32 `WH_KEYBOARD_LL` hook captures `Alt+Tab` before Windows processes it
+2. **Windows Graphics Capture (WGC)**: Modern DirectX-based capture API for high-quality window previews
+3. **Desktop Window Manager (DWM)**: Blur-behind effect for transparent background
+4. **WPF 3D Rendering**: Hardware-accelerated `Viewport3D` with perspective camera and transform animations
+5. **Window Enumeration**: `EnumWindows` API with intelligent filtering logic
 
 ### Architecture
 
 ```
-WindowsCoverflow
-├── Models
-│   └── WindowInfo.cs          # Window data model
-├── Services
-│   ├── WindowManager.cs       # Window enumeration & capture
-│   ├── KeyboardHook.cs        # Global hotkey handler
-│   └── SystemTrayService.cs   # System tray integration
-├── MainWindow.xaml            # 3D Coverflow UI
-└── App.xaml                   # Application entry point
+WindowsCoverflow/
+├── Models/
+│   └── WindowInfo.cs              # Window metadata and thumbnail storage
+├── Services/
+│   ├── WindowManager.cs           # Window enumeration, filtering, and switching
+│   ├── WindowsGraphicsCaptureService.cs  # WGC-based high-quality capture
+│   ├── KeyboardHook.cs            # Global keyboard hook with Alt+Tab interception
+│   └── SystemTrayService.cs       # System tray integration
+├── MainWindow.xaml                # 3D Coverflow viewport and UI
+├── MainWindow.xaml.cs             # Animation logic and rendering pipeline
+└── App.xaml                       # Application configuration and styles
 ```
 
-## 🔧 Configuration
+### Performance Characteristics
 
-Currently, configuration is done through the Settings dialog (accessible from system tray).
+- **Memory Usage**: Approximately 50-100MB (varies with number of open windows)
+- **CPU Usage**: Near-zero when idle; brief spike during window switching
+- **Capture Performance**: Asynchronous thumbnail loading with preloading of adjacent windows
+- **Animation Performance**: Hardware-accelerated 3D transforms at 60 FPS
 
-### Planned Features
+## Configuration
 
-- [ ] Customizable keybindings
-- [ ] Animation speed control
-- [ ] Window filtering options
-- [ ] Theme customization
-- [ ] Multi-monitor support
-- [ ] Window grouping by application
-- [ ] Search/filter windows by name
+### Current Parameters
 
-## 🐛 Troubleshooting
+The following visual parameters are configured in the source code:
 
-### Alt+Tab not working
+- **Coverflow Angle**: 55 degrees
+- **Window Offset**: 380 pixels
+- **Side Window Scale**: 0.8x
+- **Focused Window Scale**: 1.3x (approximately 50% of screen)
+- **Animation Duration**: 220ms with quintic ease-out
+- **Background Opacity**: 50%
 
-- Make sure the application is running (check system tray)
-- Run the application as Administrator if needed
-- Check if another application is capturing Alt+Tab
+### Future Enhancements
 
-### Windows not showing thumbnails
+- Customizable keybindings
+- Animation speed control
+- Visual theme customization
+- Multi-monitor awareness
+- Window grouping by application
+- Search and filter capabilities
 
-- Ensure Windows Aero/DWM is enabled
-- Some protected windows (e.g., UAC prompts) cannot be captured
-- Try closing and reopening the switcher
+## Troubleshooting
 
-### Application crashes on startup
+### Alt+Tab Not Working
 
-- Verify .NET 8.0 Runtime is installed
-- Check Windows Event Viewer for error details
-- Run from command line to see error messages
+- Verify the application is running (check system tray for icon)
+- Run the application as Administrator if other applications are interfering
+- Ensure no other Alt+Tab replacement tools are active
 
-## 📝 License
+### Windows Not Showing Previews
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+- Confirm Desktop Window Manager (DWM) is enabled
+- Some protected windows (UAC prompts, secure desktop) cannot be captured
+- Try closing and reopening the switcher to refresh captures
+
+### Application Crashes on Startup
+
+- Verify .NET 9.0 Runtime is installed correctly
+- Check Windows Event Viewer for detailed error information
+- Run from command line to view console output
+
+### Poor Performance or Lag
+
+- Close unused windows to reduce memory usage
+- Disable hardware acceleration in graphics settings if experiencing issues
+- Check for Windows updates and graphics driver updates
+
+## License
+
+This project is licensed under the GNU General Public License v3.0. See the [LICENSE](LICENSE) file for complete details.
 
 Inspired by the [GNOME Coverflow Alt-Tab extension](https://github.com/dsheeler/CoverflowAltTab) by dsheeler and contributors.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-- GNOME Coverflow Alt-Tab extension for the inspiration
-- Microsoft WPF team for the excellent 3D rendering capabilities
-- The open-source community
+- GNOME Coverflow Alt-Tab extension for the visual design inspiration
+- Microsoft WPF and Windows Graphics Capture teams for excellent APIs
+- The open-source community for tools and feedback
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Please follow these steps:
 
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/YourFeature`)
+3. Commit your changes with clear messages (`git commit -m 'Add YourFeature'`)
+4. Push to your branch (`git push origin feature/YourFeature`)
+5. Open a Pull Request with a detailed description
 
-## 📧 Contact
+## Contact
 
 Project Link: [https://github.com/yourusername/windowsCoverflow](https://github.com/yourusername/windowsCoverflow)
 
 ---
 
-**Note**: This is an independent implementation for Windows and is not affiliated with the original GNOME extension project.
+**Note**: This is an independent Windows implementation and is not affiliated with the original GNOME extension project.
