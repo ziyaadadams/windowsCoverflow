@@ -432,10 +432,11 @@ namespace WindowsCoverflow.Services
                 }
 
                 // METHOD 1: Try PrintWindow (doesn't include our overlay)
-                using var bitmap = new System.Drawing.Bitmap(width, height);
+                // Use premultiplied alpha and clear to transparent so any unpainted margins don't show as white/grey.
+                using var bitmap = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
                 using var graphics = System.Drawing.Graphics.FromImage(bitmap);
                 
-                graphics.Clear(System.Drawing.Color.White);
+                graphics.Clear(System.Drawing.Color.Transparent);
                 IntPtr hdcBitmap = graphics.GetHdc();
                 
                 try
@@ -455,8 +456,9 @@ namespace WindowsCoverflow.Services
                 System.Drawing.Bitmap finalBmp = bitmap;
                 if (scale < 0.99)
                 {
-                    finalBmp = new System.Drawing.Bitmap(targetWidth, targetHeight);
+                    finalBmp = new System.Drawing.Bitmap(targetWidth, targetHeight, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
                     using var g = System.Drawing.Graphics.FromImage(finalBmp);
+                    g.Clear(System.Drawing.Color.Transparent);
                     g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                     g.DrawImage(bitmap, 0, 0, targetWidth, targetHeight);
                 }
@@ -683,11 +685,21 @@ namespace WindowsCoverflow.Services
         {
             try
             {
-                // Calculate crop region
-                int cropLeft = contentRect.Left - windowRect.Left;
-                int cropTop = contentRect.Top - windowRect.Top;
-                int cropWidth = contentRect.Right - contentRect.Left;
-                int cropHeight = contentRect.Bottom - contentRect.Top;
+                // Calculate crop region.
+                // IMPORTANT: Windows Graphics Capture may return a scaled image (e.g. capped at 2560x1600).
+                // Scale the rect deltas into the source bitmap's pixel space, otherwise you'll see uneven borders.
+                int windowW = windowRect.Right - windowRect.Left;
+                int windowH = windowRect.Bottom - windowRect.Top;
+                if (windowW <= 0 || windowH <= 0)
+                    return source;
+
+                double scaleX = (double)source.PixelWidth / windowW;
+                double scaleY = (double)source.PixelHeight / windowH;
+
+                int cropLeft = (int)Math.Round((contentRect.Left - windowRect.Left) * scaleX);
+                int cropTop = (int)Math.Round((contentRect.Top - windowRect.Top) * scaleY);
+                int cropWidth = (int)Math.Round((contentRect.Right - contentRect.Left) * scaleX);
+                int cropHeight = (int)Math.Round((contentRect.Bottom - contentRect.Top) * scaleY);
 
                 // Ensure crop region is valid
                 if (cropLeft < 0) cropLeft = 0;
@@ -697,6 +709,16 @@ namespace WindowsCoverflow.Services
 
                 if (cropWidth <= 0 || cropHeight <= 0)
                     return source; // Can't crop, return original
+
+                // Extra inset to eliminate any residual border that can remain in WGC/DWM captures.
+                const int extraInset = 6;
+                if (cropWidth > (extraInset * 2 + 2) && cropHeight > (extraInset * 2 + 2))
+                {
+                    cropLeft += extraInset;
+                    cropTop += extraInset;
+                    cropWidth -= extraInset * 2;
+                    cropHeight -= extraInset * 2;
+                }
 
                 // Create cropped bitmap
                 var cropped = new CroppedBitmap(source, new Int32Rect(cropLeft, cropTop, cropWidth, cropHeight));

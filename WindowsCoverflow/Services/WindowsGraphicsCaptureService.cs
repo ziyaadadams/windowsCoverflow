@@ -306,7 +306,7 @@ namespace WindowsCoverflow.Services
 
             // Query IDXGIDevice from ID3D11Device
             var dxgiDeviceGuid = new Guid("54ec77fa-1377-44e6-8c32-88fd5f44c84c"); // IDXGIDevice
-            Marshal.QueryInterface(d3dDevice, ref dxgiDeviceGuid, out var dxgiDevice);
+            Marshal.QueryInterface(d3dDevice, in dxgiDeviceGuid, out var dxgiDevice);
 
             using var d3dDeviceReleaser = new ComReleaser(d3dDevice);
             using var dxgiDeviceReleaser = new ComReleaser(dxgiDevice);

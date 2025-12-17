@@ -8,7 +8,10 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Media3D;
 using System.Runtime.InteropServices;
+using System.Windows.Controls;
 using System.Windows.Threading;
+using System.Windows.Interop;
+using WindowsCoverflow.Controls;
 using WindowsCoverflow.Services;
 using WindowsCoverflow.Models;
 
@@ -78,7 +81,13 @@ namespace WindowsCoverflow
 
         private readonly Dictionary<int, GeometryModel3D> _modelsByIndex = new();
         private readonly Dictionary<ModelVisual3D, TransformParts> _transformPartsByVisual = new();
+        private readonly Dictionary<int, FrameworkElement> _liveCardByIndex = new();
+        private readonly Dictionary<FrameworkElement, Transform2DParts> _transform2dPartsByElement = new();
         private System.Threading.CancellationTokenSource? _thumbCts;
+
+        // Prefer DWM thumbnails for live, high-quality previews while the switcher is open.
+        // Keep this runtime-configurable to avoid compile-time unreachable branches.
+        private bool _useLiveDwmThumbnails = true;
 
         private sealed class TransformParts
         {
@@ -88,14 +97,22 @@ namespace WindowsCoverflow
             public required TranslateTransform3D Translate { get; init; }
         }
 
+        private sealed class Transform2DParts
+        {
+            public required ScaleTransform Scale { get; init; }
+            public required SkewTransform Skew { get; init; }
+            public required TranslateTransform Translate { get; init; }
+        }
+
         public MainWindow()
         {
             InitializeComponent();
 
-            // Enable subtle blur behind the switcher background (best-effort; silently fails if unsupported)
+            // Enable DWM glass/blur behind the switcher background (best-effort; silently fails if unsupported)
+            // NOTE: DWM thumbnails won't render into layered windows (WPF AllowsTransparency=True).
             this.SourceInitialized += (_, __) =>
             {
-                try { EnableBlurBehind(); } catch { }
+                try { EnableDwmEffects(); } catch { }
             };
             
             // Start hidden immediately
@@ -125,14 +142,42 @@ namespace WindowsCoverflow
             public bool fTransitionOnMaximized;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MARGINS
+        {
+            public int cxLeftWidth;
+            public int cxRightWidth;
+            public int cyTopHeight;
+            public int cyBottomHeight;
+        }
+
         [DllImport("dwmapi.dll")]
         private static extern int DwmEnableBlurBehindWindow(IntPtr hwnd, ref DWM_BLURBEHIND blurBehind);
 
-        private void EnableBlurBehind()
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref MARGINS margins);
+
+        private void EnableDwmEffects()
         {
-            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            var hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd == IntPtr.Zero)
                 return;
+
+            // Extend the DWM frame into the entire client area ("glass"), enabling transparency
+            // without making the window layered (required for DWM thumbnails).
+            var margins = new MARGINS
+            {
+                cxLeftWidth = -1,
+                cxRightWidth = -1,
+                cyTopHeight = -1,
+                cyBottomHeight = -1
+            };
+            DwmExtendFrameIntoClientArea(hwnd, ref margins);
+
+            if (PresentationSource.FromVisual(this) is HwndSource source && source.CompositionTarget != null)
+            {
+                source.CompositionTarget.BackgroundColor = Colors.Transparent;
+            }
 
             var bb = new DWM_BLURBEHIND
             {
@@ -271,6 +316,28 @@ namespace WindowsCoverflow
             // Reset keyboard hook state to release Alt key
             _keyboardHook.ResetState();
 
+            // Cleanup live DWM thumbnails
+            if (LiveCanvas != null)
+            {
+                foreach (var root in LiveCanvas.Children.OfType<Grid>())
+                {
+                    foreach (var host in root.Children.OfType<DwmThumbnailHost>())
+                    {
+                        host.Dispose();
+                    }
+                }
+
+                LiveCanvas.Children.Clear();
+                LiveCanvas.Visibility = Visibility.Collapsed;
+            }
+            _liveCardByIndex.Clear();
+            _transform2dPartsByElement.Clear();
+
+            if (Viewport != null)
+            {
+                Viewport.Visibility = Visibility.Visible;
+            }
+
             // Make it disappear instantly to avoid any ghosting artifacts
             this.Opacity = 0.0;
             
@@ -298,6 +365,12 @@ namespace WindowsCoverflow
 
         private void BuildCoverflow()
         {
+            if (_useLiveDwmThumbnails)
+            {
+                BuildCoverflowLive();
+                return;
+            }
+
             ResetViewportToLightsOnly();
 
             _modelsByIndex.Clear();
@@ -311,6 +384,173 @@ namespace WindowsCoverflow
             }
 
             AnimateCoverflow();
+        }
+
+        private void BuildCoverflowLive()
+        {
+            if (Viewport != null)
+                Viewport.Visibility = Visibility.Collapsed;
+
+            if (LiveCanvas == null)
+            {
+                // Fallback to legacy renderer if XAML layer isn't available.
+                _useLiveDwmThumbnails = false;
+                BuildCoverflow();
+                return;
+            }
+
+            LiveCanvas.Visibility = Visibility.Visible;
+
+            foreach (var root in LiveCanvas.Children.OfType<Grid>())
+            {
+                foreach (var host in root.Children.OfType<DwmThumbnailHost>())
+                {
+                    host.Dispose();
+                }
+            }
+
+            LiveCanvas.Children.Clear();
+            _liveCardByIndex.Clear();
+            _transform2dPartsByElement.Clear();
+
+            // Card size in 2D (kept close to the existing 3D mesh proportions)
+            const double cardW = 520;
+            const double cardH = 390;
+            const double footerH = 80;
+            const double previewH = cardH - footerH;
+
+            for (int i = 0; i < _windows.Count; i++)
+            {
+                var w = _windows[i];
+
+                var root = new Grid
+                {
+                    Width = cardW,
+                    Height = cardH,
+                    IsHitTestVisible = false,
+                    SnapsToDevicePixels = true
+                };
+                RenderOptions.SetBitmapScalingMode(root, BitmapScalingMode.HighQuality);
+
+                root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(previewH) });
+                root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(footerH) });
+
+                var previewHost = new DwmThumbnailHost
+                {
+                    SourceHwnd = w.Handle,
+                    CornerRadius = 20,
+                    SourceClientAreaOnly = true
+                };
+                Grid.SetRow(previewHost, 0);
+                root.Children.Add(previewHost);
+
+                var footer = new Grid { Margin = new Thickness(16, 0, 16, 0) };
+                footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                Grid.SetRow(footer, 1);
+
+                var icon = new Image
+                {
+                    Width = 36,
+                    Height = 36,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 12, 0),
+                    Source = w.Icon
+                };
+                footer.Children.Add(icon);
+
+                var title = new TextBlock
+                {
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Foreground = new SolidColorBrush(Color.FromRgb(230, 230, 230)),
+                    FontSize = 18,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    Text = string.IsNullOrWhiteSpace(w.Title) ? "(untitled)" : w.Title
+                };
+                Grid.SetColumn(title, 1);
+                footer.Children.Add(title);
+
+                root.Children.Add(footer);
+
+                // Rounded corners for the overall card silhouette.
+                // Note: HwndHost itself doesn't clip in WPF; the preview rounding is handled by DwmThumbnailHost via SetWindowRgn.
+                root.Clip = new RectangleGeometry(new Rect(0, 0, cardW, cardH), 20, 20);
+
+                // Transform setup
+                var scale = new ScaleTransform(1, 1);
+                var skew = new SkewTransform(0, 0);
+                var translate = new TranslateTransform(0, 0);
+                var tg = new TransformGroup();
+                tg.Children.Add(scale);
+                tg.Children.Add(skew);
+                tg.Children.Add(translate);
+                root.RenderTransform = tg;
+                root.RenderTransformOrigin = new Point(0.5, 0.5);
+
+                _transform2dPartsByElement[root] = new Transform2DParts { Scale = scale, Skew = skew, Translate = translate };
+                _liveCardByIndex[i] = root;
+
+                LiveCanvas.Children.Add(root);
+            }
+
+            // Ensure layout is available for initial positioning
+            LiveCanvas.UpdateLayout();
+            AnimateCoverflowLive();
+        }
+
+        private void AnimateCoverflowLive()
+        {
+            if (_windows.Count == 0)
+                return;
+
+            // Layout params roughly aligned with the 3D coverflow settings
+            const double offset = 400;
+            const double centerScale = 1.25;
+            const double scaleFalloff = 0.88;
+            const double maxSkew = 18; // degrees (visual proxy for Y-rotation)
+
+            double canvasW = LiveCanvas.ActualWidth;
+            double canvasH = LiveCanvas.ActualHeight;
+            if (canvasW <= 1 || canvasH <= 1)
+            {
+                canvasW = ActualWidth;
+                canvasH = ActualHeight;
+            }
+
+            double centerX = canvasW / 2.0;
+            double centerY = canvasH / 2.0;
+
+            var ease = new QuinticEase { EasingMode = EasingMode.EaseOut };
+            TimeSpan duration = TimeSpan.FromMilliseconds(220);
+
+            foreach (var kvp in _liveCardByIndex)
+            {
+                int index = kvp.Key;
+                var element = kvp.Value;
+                if (!_transform2dPartsByElement.TryGetValue(element, out var parts))
+                    continue;
+
+                int distance = index - _currentIndex;
+                int abs = Math.Abs(distance);
+                double dir = distance == 0 ? 0 : Math.Sign(distance);
+
+                double x = centerX + (distance * offset);
+                double y = centerY;
+
+                double s = distance == 0 ? centerScale : Math.Max(0.68, Math.Pow(scaleFalloff, abs));
+                double skew = distance == 0 ? 0 : (-dir * maxSkew);
+
+                Panel.SetZIndex(element, 1000 - abs);
+
+                double tx = x - (element.Width / 2.0);
+                double ty = y - (element.Height / 2.0);
+
+                AnimateDouble(parts.Translate, TranslateTransform.XProperty, tx, duration, ease);
+                AnimateDouble(parts.Translate, TranslateTransform.YProperty, ty, duration, ease);
+                AnimateDouble(parts.Scale, ScaleTransform.ScaleXProperty, s, duration, ease);
+                AnimateDouble(parts.Scale, ScaleTransform.ScaleYProperty, s, duration, ease);
+                AnimateDouble(parts.Skew, SkewTransform.AngleYProperty, skew, duration, ease);
+            }
         }
 
         private TransformParts EnsureTransformParts(ModelVisual3D visual)
@@ -470,17 +710,64 @@ namespace WindowsCoverflow
             RenderOptions.SetBitmapScalingMode(dv, BitmapScalingMode.HighQuality);
             using (var dc = dv.RenderOpen())
             {
-                // Preview area - full window preview without clipping
+                // Clear to fully transparent so any letterboxing is transparent (not grey/black).
+                dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, cardW, cardH));
+
+                const double cornerRadius = 20;
+
+                // Clip the full card to rounded corners (does not crop the preview content; only rounds edges).
+                var cardClip = new RectangleGeometry(new Rect(0, 0, cardW, cardH), cornerRadius, cornerRadius);
+                dc.PushClip(cardClip);
+
+                // Preview area - show full preview (no cropping) with transparent letterboxing.
                 Rect previewRect = new Rect(0, 0, cardW, previewH);
                 if (window.Thumbnail != null)
                 {
                     var thumbBrush = new ImageBrush(window.Thumbnail)
                     {
-                        Stretch = Stretch.UniformToFill,
+                        Stretch = Stretch.Uniform,
                         TileMode = TileMode.None,
                         AlignmentX = AlignmentX.Center,
                         AlignmentY = AlignmentY.Center
                     };
+
+                    // Many windows include a thin non-client edge/shadow in captures.
+                    // Trim a small margin to eliminate the visible grey/black bars without changing layout.
+                    // Use pixel-based trim converted to relative units, with conservative clamps.
+                    // This avoids over-cropping small windows (which can make them look like "title bar only").
+                    int tw = Math.Max(1, window.Thumbnail.PixelWidth);
+                    int th = Math.Max(1, window.Thumbnail.PixelHeight);
+
+                    int leftPx = Math.Min(8, Math.Max(2, tw / 320));
+                    int topPx = Math.Min(8, Math.Max(2, th / 320));
+
+                    // Do not trim right/bottom to avoid cutting content; artifacts are reported on top/left.
+                    int rightPx = 0;
+                    int bottomPx = 0;
+
+                    // For very small captures, keep only a tiny trim so the border doesn't come back,
+                    // but never large enough to turn the preview into "title-bar only".
+                    if (tw < 600 || th < 400)
+                    {
+                        leftPx = 2;
+                        topPx = 2;
+                    }
+
+                    double cropLeft = (double)leftPx / tw;
+                    double cropTop = (double)topPx / th;
+                    double cropRight = (double)rightPx / tw;
+                    double cropBottom = (double)bottomPx / th;
+
+                    if ((cropLeft + cropRight) < 0.10 && (cropTop + cropBottom) < 0.10)
+                    {
+                        thumbBrush.ViewboxUnits = BrushMappingMode.RelativeToBoundingBox;
+                        thumbBrush.Viewbox = new Rect(
+                            cropLeft,
+                            cropTop,
+                            1.0 - (cropLeft + cropRight),
+                            1.0 - (cropTop + cropBottom));
+                    }
+
                     RenderOptions.SetBitmapScalingMode(thumbBrush, BitmapScalingMode.Fant);
                     dc.DrawRectangle(thumbBrush, null, previewRect);
                 }
@@ -510,6 +797,8 @@ namespace WindowsCoverflow
                 double textX = iconX + iconSize + 16;
                 double textY = previewH + (footerH - ft.Height) / 2;
                 dc.DrawText(ft, new Point(textX, textY));
+                
+                dc.Pop();
             }
 
             var rtb = new RenderTargetBitmap(cardW, cardH, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
@@ -622,6 +911,12 @@ namespace WindowsCoverflow
 
         private void AnimateCoverflow()
         {
+            if (_useLiveDwmThumbnails)
+            {
+                AnimateCoverflowLive();
+                return;
+            }
+
             if (_windows.Count == 0) return;
 
             var visualsWithDistance = new List<(ModelVisual3D visual, int relativeIndex)>();

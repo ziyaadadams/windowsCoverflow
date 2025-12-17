@@ -16,7 +16,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- 3D Viewport for Coverflow effect -->
+        <!-- 3D Viewport for legacy (bitmap-texture) renderer -->
         <Viewport3D x:Name="Viewport" Grid.Row="0" ClipToBounds="False">
             <Viewport3D.Camera>
                 <PerspectiveCamera x:Name="Camera" 
@@ -38,6 +38,9 @@
             
             <!-- Dynamic window cards will be added here via code -->
         </Viewport3D>
+
+        <!-- Live DWM thumbnail layer (HWND hosts) -->
+        <Canvas x:Name="LiveCanvas" Grid.Row="0" IsHitTestVisible="False" Visibility="Collapsed" />
 
         <!-- Bottom info bar (disabled: per-card icon+title is rendered on each card) -->
         <Border Grid.Row="1" 
